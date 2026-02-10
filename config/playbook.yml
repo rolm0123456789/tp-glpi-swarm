@@ -1,0 +1,78 @@
+- name: Configuration de base
+  hosts: all
+  become: yes
+  tasks:
+      - name: Update APT
+        apt: update_cache=yes
+
+      - name: Install dependencies
+        apt: name={{ item }} state=present
+        loop:
+            [
+                'apt-transport-https',
+                'ca-certificates',
+                'curl',
+                'gnupg-agent',
+                'software-properties-common',
+                'nfs-common',
+            ]
+
+      - name: Install Docker
+        shell: curl -fsSL https://get.docker.com | sh
+        args:
+            creates: /usr/bin/docker
+
+      - name: Add vagrant user to docker group
+        user: name=vagrant groups=docker append=yes
+
+      - name: Ensure /mnt/shared directory exists
+        file: path=/mnt/shared state=directory mode=0777
+
+- name: Setup NFS Server (Manager Only)
+  hosts: managers
+  become: yes
+  tasks:
+      - name: Install NFS Kernel Server
+        apt: name=nfs-kernel-server state=present
+
+      - name: Configure Exports
+        lineinfile:
+            path: /etc/exports
+            line: '/mnt/shared *(rw,sync,no_subtree_check,no_root_squash)'
+            create: yes
+        notify: Restart NFS
+
+  handlers:
+      - name: Restart NFS
+        service: name=nfs-kernel-server state=restarted
+
+- name: Mount NFS (All Nodes)
+  hosts: all
+  become: yes
+  tasks:
+      - name: Mount Shared Volume
+        mount:
+            path: /mnt/shared
+            src: "{{ hostvars[groups['managers'][0]]['ansible_host'] }}:/mnt/shared"
+            fstype: nfs
+            state: mounted
+
+- name: Init Swarm Cluster
+  hosts: managers
+  become: yes
+  tasks:
+      - name: Init Swarm
+        shell: docker swarm init --advertise-addr {{ ansible_host }}
+        ignore_errors: yes
+
+      - name: Retrieve Worker Token
+        shell: docker swarm join-token -q worker
+        register: worker_token
+
+- name: Join Workers
+  hosts: workers
+  become: yes
+  tasks:
+      - name: Join Swarm
+        shell: "docker swarm join --token {{ hostvars[groups['managers'][0]]['worker_token']['stdout'] }} {{ hostvars[groups['managers'][0]]['ansible_host'] }}:2377"
+        ignore_errors: yes

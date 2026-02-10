@@ -1,0 +1,89 @@
+version: '3.8'
+
+secrets:
+    db_root_password:
+        external: true
+    db_password:
+        external: true
+
+networks:
+    frontend:
+        driver: overlay
+    backend:
+        driver: overlay
+        internal: true
+
+services:
+    # --- Reverse Proxy (3 instances) ---
+    nginx:
+        image: nginx:alpine
+        deploy:
+            mode: global
+            restart_policy:
+                condition: on-failure
+        ports:
+            - '80:80'
+            - '443:443'
+        volumes:
+            - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+            - ./nginx/conf.d:/etc/nginx/conf.d:ro
+            - /mnt/shared/certbot_conf:/etc/letsencrypt:ro
+            - /mnt/shared/certbot_www:/var/www/certbot:ro
+        networks:
+            - frontend
+
+    # --- Certbot (Génération SSL) ---
+    certbot:
+        image: certbot/certbot
+        volumes:
+            - /mnt/shared/certbot_conf:/etc/letsencrypt
+            - /mnt/shared/certbot_www:/var/www/certbot
+        # Commande boucle infinie pour éviter que le conteneur ne meurt
+        entrypoint: "/bin/sh -c 'trap exit TERM; while :; do sleep 12h & wait $${!}; done;'"
+        deploy:
+            replicas: 1
+            placement:
+                constraints: [node.role == manager]
+
+    # --- GLPI App ---
+    glpi:
+        image: glpi/glpi:latest
+        depends_on:
+            - mariadb
+        environment:
+            - MARIADB_HOST=mariadb
+            - MARIADB_DATABASE=glpi
+            - MARIADB_USER=glpi
+            - MARIADB_PASSWORD_FILE=/run/secrets/db_password
+        secrets:
+            - db_password
+        volumes:
+            - /mnt/shared/glpi_data:/var/www/html/glpi
+        networks:
+            - frontend
+            - backend
+        deploy:
+            replicas: 2
+            update_config:
+                parallelism: 1
+                delay: 10s
+
+    # --- Database ---
+    mariadb:
+        image: mariadb:10.11
+        environment:
+            - MYSQL_ROOT_PASSWORD_FILE=/run/secrets/db_root_password
+            - MYSQL_DATABASE=glpi
+            - MYSQL_USER=glpi
+            - MYSQL_PASSWORD_FILE=/run/secrets/db_password
+        secrets:
+            - db_root_password
+            - db_password
+        volumes:
+            # On épingle la DB sur le manager pour la perf disque, ou on utilise le NFS
+            - /mnt/shared/mysql_data:/var/lib/mysql
+        networks:
+            - backend
+        deploy:
+            placement:
+                constraints: [node.role == manager]
