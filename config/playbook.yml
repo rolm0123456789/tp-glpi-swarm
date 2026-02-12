@@ -28,6 +28,52 @@
       - name: Ensure /mnt/shared directory exists
         file: path=/mnt/shared state=directory mode=0777
 
+      - name: Install UFW
+        apt: name=ufw state=present
+
+      - name: Allow SSH
+        ufw: rule=allow port=22 proto=tcp
+
+      - name: Allow HTTP
+        ufw: rule=allow port=80 proto=tcp
+
+      - name: Allow HTTPS
+        ufw: rule=allow port=443 proto=tcp
+
+      - name: Allow Docker Swarm Management
+        ufw: rule=allow port=2377 proto=tcp
+
+      - name: Allow Docker Overlay Network
+        ufw: rule=allow port=4789 proto=udp
+
+      - name: Allow Docker Container Discovery
+        ufw: rule=allow port=7946 proto=tcp
+        
+      - name: Allow Docker Container Discovery UDP
+        ufw: rule=allow port=7946 proto=udp
+
+      - name: Enable UFW
+        ufw: state=enabled policy=deny
+
+      - name: Hardening SSH - Disable Password Auth
+        lineinfile:
+          path: /etc/ssh/sshd_config
+          regexp: '^#?PasswordAuthentication'
+          line: 'PasswordAuthentication no'
+        notify: Restart SSH
+        
+      - name: Hardening SSH - Disable Root Login
+        lineinfile:
+          path: /etc/ssh/sshd_config
+          regexp: '^#?PermitRootLogin'
+          line: 'PermitRootLogin no'
+        notify: Restart SSH
+
+  handlers:
+      - name: Restart SSH
+        service: name=ssh state=restarted
+
+
 - name: Setup NFS Server (Manager Only)
   hosts: managers
   become: yes
