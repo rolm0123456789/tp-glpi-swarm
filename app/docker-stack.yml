@@ -1,89 +1,162 @@
 version: '3.8'
 
 secrets:
-    db_root_password:
-        external: true
-    db_password:
-        external: true
+  db_root_password:
+    external: true
+  db_password:
+    external: true
 
 networks:
-    frontend:
-        driver: overlay
-    backend:
-        driver: overlay
-        internal: true
+  frontend:
+    driver: overlay
+    attachable: true
+  backend:
+    driver: overlay
+    internal: true
 
 services:
-    # --- Reverse Proxy (3 instances) ---
-    nginx:
-        image: nginx:alpine
-        deploy:
-            mode: global
-            restart_policy:
-                condition: on-failure
-        ports:
-            - '80:80'
-            - '443:443'
-        volumes:
-            - /mnt/shared/nginx_conf/nginx.conf:/etc/nginx/nginx.conf:ro
-            - /mnt/shared/nginx_conf/conf.d:/etc/nginx/conf.d:ro
-            - /mnt/shared/certbot_conf:/etc/letsencrypt:ro
-            - /mnt/shared/certbot_www:/var/www/certbot:ro
-        networks:
-            - frontend
+  # =================================================================
+  #  Reverse Proxy Nginx - Mode global (1 instance par noeud = 3)
+  # =================================================================
+  nginx:
+    image: nginx:1.25-alpine
+    deploy:
+      mode: global
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 0
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+        reservations:
+          cpus: '0.10'
+          memory: 64M
+    ports:
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
+      - target: 443
+        published: 443
+        protocol: tcp
+        mode: host
+    volumes:
+      - /mnt/shared/nginx_conf/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /mnt/shared/nginx_conf/conf.d:/etc/nginx/conf.d:ro
+      - /mnt/shared/certbot_conf:/etc/letsencrypt:ro
+      - /mnt/shared/certbot_www:/var/www/certbot:ro
+    networks:
+      - frontend
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
-    # --- Certbot (Génération SSL) ---
-    certbot:
-        image: certbot/certbot
-        volumes:
-            - /mnt/shared/certbot_conf:/etc/letsencrypt
-            - /mnt/shared/certbot_www:/var/www/certbot
-        # Commande boucle infinie pour éviter que le conteneur ne meurt
-        entrypoint: "/bin/sh -c 'trap exit TERM; while :; do sleep 12h & wait $${!}; done;'"
-        deploy:
-            replicas: 1
-            placement:
-                constraints: [node.role == manager]
+  # =================================================================
+  #  Certbot - Génération et renouvellement automatique SSL
+  # =================================================================
+  certbot:
+    image: certbot/certbot:latest
+    volumes:
+      - /mnt/shared/certbot_conf:/etc/letsencrypt
+      - /mnt/shared/certbot_www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew --quiet 2>/dev/null; sleep 12h & wait $${!}; done'"
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
 
-    # --- GLPI App ---
-    glpi:
-        image: glpi/glpi:latest
-        depends_on:
-            - mariadb
-        environment:
-            - MARIADB_HOST=mariadb
-            - MARIADB_DATABASE=glpi
-            - MARIADB_USER=glpi
-            - MARIADB_PASSWORD_FILE=/run/secrets/db_password
-        secrets:
-            - db_password
-        volumes:
-            - /mnt/shared/glpi_data:/var/www/html/glpi
-        networks:
-            - frontend
-            - backend
-        deploy:
-            replicas: 2
-            update_config:
-                parallelism: 1
-                delay: 10s
+  # =================================================================
+  #  Application GLPI
+  # =================================================================
+  glpi:
+    image: diouxx/glpi:latest
+    environment:
+      TIMEZONE: Europe/Paris
+    volumes:
+      - /mnt/shared/glpi_data:/var/www/html/glpi
+    networks:
+      - frontend
+      - backend
+    deploy:
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 0
+      resources:
+        limits:
+          cpus: '1.00'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/ > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
 
-    # --- Database ---
-    mariadb:
-        image: mariadb:10.11
-        environment:
-            - MYSQL_ROOT_PASSWORD_FILE=/run/secrets/db_root_password
-            - MYSQL_DATABASE=glpi
-            - MYSQL_USER=glpi
-            - MYSQL_PASSWORD_FILE=/run/secrets/db_password
-        secrets:
-            - db_root_password
-            - db_password
-        volumes:
-            # On épingle la DB sur le manager pour la perf disque, ou on utilise le NFS
-            - /mnt/shared/mysql_data:/var/lib/mysql
-        networks:
-            - backend
-        deploy:
-            placement:
-                constraints: [node.role == manager]
+  # =================================================================
+  #  Base de données MariaDB
+  # =================================================================
+  mariadb:
+    image: mariadb:10.11
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MYSQL_DATABASE: glpi
+      MYSQL_USER: glpi
+      MYSQL_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_root_password
+      - db_password
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - backend
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+      resources:
+        limits:
+          cpus: '1.00'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    command: >-
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --innodb-buffer-pool-size=256M
+      --innodb-flush-log-at-trx-commit=2
+      --max-connections=200
+
+volumes:
+  mariadb_data:
+    driver: local

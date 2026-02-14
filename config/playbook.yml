@@ -1,124 +1,249 @@
-- name: Configuration de base
+---
+# =============================================================
+#  Play 1 : Configuration de base - Tous les noeuds
+# =============================================================
+- name: Configuration de base - Tous les noeuds
   hosts: all
   become: yes
   tasks:
-      - name: Update APT
-        apt: update_cache=yes
+    - name: Mise à jour du cache APT
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
 
-      - name: Install dependencies
-        apt: name={{ item }} state=present
-        loop:
-            [
-                'apt-transport-https',
-                'ca-certificates',
-                'curl',
-                'gnupg-agent',
-                'software-properties-common',
-                'nfs-common',
-            ]
+    - name: Installation des dépendances système
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg-agent
+          - software-properties-common
+          - nfs-common
+          - openssl
+        state: present
 
-      - name: Install Docker
-        shell: curl -fsSL https://get.docker.com | sh
-        args:
-            creates: /usr/bin/docker
+    - name: Ajout de la clé GPG Docker
+      shell: |
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
+      args:
+        creates: /etc/apt/keyrings/docker.asc
 
-      - name: Add vagrant user to docker group
-        user: name=vagrant groups=docker append=yes
+    - name: Ajout du dépôt Docker APT
+      shell: |
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+        apt-get update -qq
+      args:
+        creates: /etc/apt/sources.list.d/docker.list
 
-      - name: Ensure /mnt/shared directory exists
-        file: path=/mnt/shared state=directory mode=0777
+    - name: Installation de Docker CE
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
 
-      - name: Install UFW
-        apt: name=ufw state=present
+    - name: Activation et démarrage de Docker
+      systemd:
+        name: docker
+        enabled: yes
+        state: started
 
-      - name: Allow SSH
-        ufw: rule=allow port=22 proto=tcp
+    - name: Ajout de vagrant au groupe docker
+      user:
+        name: vagrant
+        groups: docker
+        append: yes
 
-      - name: Allow HTTP
-        ufw: rule=allow port=80 proto=tcp
+    - name: Création du répertoire partagé
+      file:
+        path: /mnt/shared
+        state: directory
+        mode: '0755'
+        owner: vagrant
+        group: vagrant
 
-      - name: Allow HTTPS
-        ufw: rule=allow port=443 proto=tcp
+    # --- Pare-feu UFW ---
+    - name: Installation UFW
+      apt:
+        name: ufw
+        state: present
 
-      - name: Allow Docker Swarm Management
-        ufw: rule=allow port=2377 proto=tcp
+    - name: UFW - Autoriser SSH
+      ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
 
-      - name: Allow Docker Overlay Network
-        ufw: rule=allow port=4789 proto=udp
+    - name: UFW - Autoriser HTTP
+      ufw:
+        rule: allow
+        port: '80'
+        proto: tcp
 
-      - name: Allow Docker Container Discovery
-        ufw: rule=allow port=7946 proto=tcp
-        
-      - name: Allow Docker Container Discovery UDP
-        ufw: rule=allow port=7946 proto=udp
+    - name: UFW - Autoriser HTTPS
+      ufw:
+        rule: allow
+        port: '443'
+        proto: tcp
 
-      - name: Enable UFW
-        ufw: state=enabled policy=deny
+    - name: UFW - Docker Swarm Management
+      ufw:
+        rule: allow
+        port: '2377'
+        proto: tcp
 
-      - name: Hardening SSH - Disable Password Auth
-        lineinfile:
-          path: /etc/ssh/sshd_config
-          regexp: '^#?PasswordAuthentication'
-          line: 'PasswordAuthentication no'
-        notify: Restart SSH
-        
-      - name: Hardening SSH - Disable Root Login
-        lineinfile:
-          path: /etc/ssh/sshd_config
-          regexp: '^#?PermitRootLogin'
-          line: 'PermitRootLogin no'
-        notify: Restart SSH
+    - name: UFW - Docker Overlay Network (UDP)
+      ufw:
+        rule: allow
+        port: '4789'
+        proto: udp
+
+    - name: UFW - Docker Node Communication (TCP)
+      ufw:
+        rule: allow
+        port: '7946'
+        proto: tcp
+
+    - name: UFW - Docker Node Communication (UDP)
+      ufw:
+        rule: allow
+        port: '7946'
+        proto: udp
+
+    - name: UFW - Autoriser NFS (réseau local uniquement)
+      ufw:
+        rule: allow
+        port: '2049'
+        proto: tcp
+        src: '192.168.56.0/24'
+
+    - name: UFW - Activer avec politique deny par défaut
+      ufw:
+        state: enabled
+        policy: deny
+
+    # --- Optimisation noyau ---
+    - name: Optimisation - Réduire le swappiness
+      sysctl:
+        name: vm.swappiness
+        value: '10'
+        sysctl_set: yes
+
+    - name: Optimisation - Augmenter le max open files
+      sysctl:
+        name: fs.file-max
+        value: '65535'
+        sysctl_set: yes
+
+    # --- Hardening SSH ---
+    - name: SSH - Désactiver le login root
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+      notify: Restart SSH
+
+    - name: SSH - Désactiver l'authentification par mot de passe
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+      notify: Restart SSH
 
   handlers:
-      - name: Restart SSH
-        service: name=ssh state=restarted
+    - name: Restart SSH
+      service:
+        name: ssh
+        state: restarted
 
-
-- name: Setup NFS Server (Manager Only)
+# =============================================================
+#  Play 2 : Serveur NFS sur le Manager
+# =============================================================
+- name: Configuration NFS - Serveur (Manager)
   hosts: managers
   become: yes
   tasks:
-      - name: Install NFS Kernel Server
-        apt: name=nfs-kernel-server state=present
+    - name: Installation du serveur NFS
+      apt:
+        name: nfs-kernel-server
+        state: present
 
-      - name: Configure Exports
-        lineinfile:
-            path: /etc/exports
-            line: '/mnt/shared *(rw,sync,no_subtree_check,no_root_squash)'
-            create: yes
-        notify: Restart NFS
+    - name: Configuration des exports NFS (réseau local)
+      lineinfile:
+        path: /etc/exports
+        line: '/mnt/shared 192.168.56.0/24(rw,sync,no_subtree_check,no_root_squash)'
+        create: yes
+      notify: Restart NFS
+
+    - name: Export des partages NFS
+      command: exportfs -ra
+      changed_when: false
 
   handlers:
-      - name: Restart NFS
-        service: name=nfs-kernel-server state=restarted
+    - name: Restart NFS
+      service:
+        name: nfs-kernel-server
+        state: restarted
 
-- name: Mount NFS (All Nodes)
-  hosts: all
-  become: yes
-  tasks:
-      - name: Mount Shared Volume
-        mount:
-            path: /mnt/shared
-            src: "{{ hostvars[groups['managers'][0]]['ansible_host'] }}:/mnt/shared"
-            fstype: nfs
-            state: mounted
-
-- name: Init Swarm Cluster
-  hosts: managers
-  become: yes
-  tasks:
-      - name: Init Swarm
-        shell: docker swarm init --advertise-addr {{ ansible_host }}
-        ignore_errors: yes
-
-      - name: Retrieve Worker Token
-        shell: docker swarm join-token -q worker
-        register: worker_token
-
-- name: Join Workers
+# =============================================================
+#  Play 3 : Montage NFS sur les Workers UNIQUEMENT
+# =============================================================
+- name: Montage NFS - Workers uniquement
   hosts: workers
   become: yes
   tasks:
-      - name: Join Swarm
-        shell: "docker swarm join --token {{ hostvars[groups['managers'][0]]['worker_token']['stdout'] }} {{ hostvars[groups['managers'][0]]['ansible_host'] }}:2377"
-        ignore_errors: yes
+    - name: Montage du volume partagé NFS
+      mount:
+        path: /mnt/shared
+        src: "{{ hostvars[groups['managers'][0]]['ansible_host'] }}:/mnt/shared"
+        fstype: nfs
+        opts: defaults,_netdev,nofail
+        state: mounted
+
+# =============================================================
+#  Play 4 : Initialisation du cluster Docker Swarm
+# =============================================================
+- name: Initialisation du cluster Swarm
+  hosts: managers
+  become: yes
+  tasks:
+    - name: Vérifier si Swarm est déjà initialisé
+      shell: docker info 2>/dev/null | grep -oP 'Swarm:\s+\K\w+'
+      register: swarm_status
+      changed_when: false
+      failed_when: false
+
+    - name: Initialiser Docker Swarm
+      command: docker swarm init --advertise-addr {{ ansible_host }}
+      when: swarm_status.stdout != 'active'
+
+    - name: Récupérer le token Worker
+      command: docker swarm join-token -q worker
+      register: worker_token
+      changed_when: false
+
+# =============================================================
+#  Play 5 : Joindre les Workers au Swarm
+# =============================================================
+- name: Joindre les Workers au Swarm
+  hosts: workers
+  become: yes
+  tasks:
+    - name: Vérifier si le noeud est déjà dans le Swarm
+      shell: docker info 2>/dev/null | grep -oP 'Swarm:\s+\K\w+'
+      register: swarm_status
+      changed_when: false
+      failed_when: false
+
+    - name: Rejoindre le Swarm
+      command: >
+        docker swarm join
+        --token {{ hostvars[groups['managers'][0]]['worker_token']['stdout'] }}
+        {{ hostvars[groups['managers'][0]]['ansible_host'] }}:2377
+      when: swarm_status.stdout != 'active'
