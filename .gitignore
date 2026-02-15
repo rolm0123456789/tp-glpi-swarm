@@ -5,8 +5,8 @@ infra/*.tfstate.backup
 infra/.terraform.lock.hcl
 *.tfvars
 
-# Vagrant
-infra/.vagrant/
+# Libvirt / images cloud (téléchargées par Terraform)
+*.img
 *.log
 
 # Ansible
@@ -24,9 +24,6 @@ Thumbs.db
 # Secrets / credentials
 app/scripts/db_root_password
 app/scripts/db_password
-
-# Images de base lourdes
-infra/virtualbox.box
 
 # VirtualBox Machine Folders
 VirtualBox VMs/

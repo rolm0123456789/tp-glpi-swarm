@@ -32,7 +32,7 @@ echo ""
 # =============================================
 log_info "[0/5] Vérification des pré-requis..."
 MISSING=""
-for cmd in terraform ansible-playbook vagrant VBoxManage sshpass; do
+for cmd in terraform ansible-playbook sshpass nc; do
     if ! command -v "$cmd" &>/dev/null; then
         MISSING="$MISSING $cmd"
     fi
@@ -60,20 +60,21 @@ fi
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i $SSH_KEY"
 
 # =============================================
-#  2. Provisionnement Terraform + Vagrant
+#  2. Provisionnement Terraform (VMs KVM/libvirt)
 # =============================================
-log_info "[2/5] Provisionnement de l'infrastructure (Terraform + Vagrant)..."
+log_info "[2/5] Provisionnement de l'infrastructure (Terraform)..."
 
 cd infra
 
 # Nettoyage propre si re-déploiement
-if [ -f ".terraform/terraform.tfstate" ] || [ -f "terraform.tfstate" ]; then
+terraform init -input=false
+
+if [ -f "terraform.tfstate" ]; then
     log_warn "État Terraform existant détecté, nettoyage..."
     terraform destroy -auto-approve 2>/dev/null || true
-    rm -rf .terraform terraform.tfstate* .terraform.lock.hcl
+    rm -f terraform.tfstate terraform.tfstate.backup
 fi
 
-terraform init -input=false
 terraform apply -auto-approve
 cd ..
 
@@ -169,8 +170,9 @@ ssh $SSH_OPTS vagrant@"$MANAGER_IP" "/home/vagrant/scripts/init-letsencrypt.sh" 
 
 # Récupération des credentials
 log_info "Récupération des credentials MariaDB..."
-echo ""
-ssh $SSH_OPTS vagrant@"$MANAGER_IP" "cat /home/vagrant/.glpi_credentials 2>/dev/null" || true
+DB_CREDS=$(ssh $SSH_OPTS vagrant@"$MANAGER_IP" "cat /home/vagrant/.glpi_credentials 2>/dev/null" || true)
+DB_PASSWORD=$(echo "$DB_CREDS" | grep "Password" | head -1 | awk '{print $NF}')
+DB_ROOT_PASSWORD=$(echo "$DB_CREDS" | grep "Root Password" | awk '{print $NF}')
 
 # =============================================
 #  Résumé final
@@ -183,6 +185,14 @@ echo ""
 echo -e "  ${BLUE}Accès GLPI :${NC}"
 echo -e "    HTTP  : http://$MANAGER_IP"
 echo -e "    HTTPS : https://$MANAGER_IP"
+echo ""
+echo -e "  ${BLUE}Base de données MariaDB :${NC}"
+echo -e "    Host          : mariadb"
+echo -e "    Port          : 3306"
+echo -e "    Database      : glpi"
+echo -e "    Utilisateur   : glpi"
+echo -e "    Mot de passe  : $DB_PASSWORD"
+echo -e "    Root password : $DB_ROOT_PASSWORD"
 echo ""
 echo -e "  ${BLUE}Accès SSH Manager :${NC}"
 echo -e "    ssh -i $SSH_KEY vagrant@$MANAGER_IP"

@@ -9,9 +9,9 @@
 
 ## 1. Architecture Générale
 
-L'infrastructure repose sur un cluster **Docker Swarm** de 3 nœuds (1 Manager, 2 Workers), provisionnés automatiquement via **Terraform + Vagrant** (VirtualBox) et configurés avec **Ansible**.
+L'infrastructure repose sur un cluster **Docker Swarm** de 3 nœuds (1 Manager, 2 Workers), provisionnés automatiquement via **Terraform** (KVM/libvirt, provider `dmacvicar/libvirt`) et configurés avec **Ansible**.
 
-Chaque VM utilise l'image **bento/ubuntu-22.04** (2 vCPU, 2 Go RAM) avec des IPs statiques sur le réseau host-only `192.168.56.0/24`.
+Chaque VM utilise l'image cloud **Ubuntu 22.04** (2 vCPU, 2 Go RAM) avec des IPs statiques via réservation DHCP sur le réseau NAT libvirt `192.168.56.0/24`. Terraform crée chaque VM comme une vraie ressource `libvirt_domain`, avec cloud-init pour la configuration initiale (utilisateur, SSH, hostname).
 
 ### Schéma des composants
 
@@ -140,9 +140,9 @@ Chaque VM utilise l'image **bento/ubuntu-22.04** (2 vCPU, 2 Go RAM) avec des IPs
 Le script `./deploy.sh` orchestre l'ensemble du déploiement en **5 étapes** :
 
 ```
-Étape 0 → Vérification des pré-requis (terraform, ansible-playbook, vagrant, VBoxManage, sshpass)
+Étape 0 → Vérification des pré-requis (terraform, ansible-playbook, sshpass, nc)
 Étape 1 → Génération de la clé SSH Ed25519
-Étape 2 → Provisionnement des 3 VMs (Terraform + Vagrant)
+Étape 2 → Terraform : réseau NAT libvirt + cloud image + cloud-init + création des 3 VMs KVM
 Étape 3 → Attente SSH + déploiement des clés + mise à jour de l'inventaire
 Étape 4 → Ansible : Installation Docker, NFS, UFW, Swarm, SSH hardening
 Étape 5 → Déploiement Docker Stack + attente GLPI + configuration SSL
@@ -151,10 +151,9 @@ Le script `./deploy.sh` orchestre l'ensemble du déploiement en **5 étapes** :
 ### Pré-requis sur la machine hôte
 
 - Terraform >= 0.13
-- Vagrant >= 2.3
 - Ansible >= 2.9
-- VirtualBox >= 6.0
-- `sshpass`
+- KVM/libvirt (qemu-kvm, libvirt-daemon, virsh)
+- `sshpass`, `nc` (netcat)
 
 ### Lancement
 
@@ -196,11 +195,11 @@ tp-glpi-swarm/
 │   └── playbook.yml             # Playbook de configuration (5 plays)
 │
 └── infra/                       # Infrastructure as Code
-    ├── main.tf                  # Définition Terraform (null_resource + Vagrant)
-    ├── Vagrantfile              # Définition des 3 VMs VirtualBox
-    ├── variables.tf             # Variables Terraform
-    ├── versions.tf              # Versions des providers (null, local)
+    ├── main.tf                  # Terraform : réseau libvirt, volumes, cloud-init, VMs KVM, inventaire
+    ├── variables.tf             # Variables (node_count, vm_memory, vm_cpus, disk_size...)
+    ├── versions.tf              # Versions des providers (dmacvicar/libvirt, local)
     └── templates/
+        ├── cloud_init.tpl       # Template cloud-init (user, SSH, hostname)
         └── inventory.tpl        # Template d'inventaire Ansible
 ```
 
