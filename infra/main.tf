@@ -57,7 +57,8 @@ resource "libvirt_cloudinit_disk" "vm_init" {
   name  = "${local.node_names[count.index]}-init.iso"
   pool  = "default"
   user_data = templatefile("${path.module}/templates/cloud_init.tpl", {
-    hostname = local.node_names[count.index]
+    hostname       = local.node_names[count.index]
+    ssh_public_key = var.ssh_public_key
   })
 }
 
@@ -107,7 +108,8 @@ resource "local_file" "ansible_inventory" {
   depends_on = [libvirt_domain.vm]
 
   content = templatefile("${path.module}/templates/inventory.tpl", {
-    nodes = local.node_ips
+    nodes           = local.node_ips
+    ssh_private_key = var.ssh_private_key_path
   })
   filename        = "${path.module}/../config/inventory.ini"
   file_permission = "0644"

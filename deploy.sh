@@ -4,6 +4,7 @@ set -euo pipefail
 # =============================================
 #  Script de déploiement automatisé
 #  GLPI High Availability - Docker Swarm
+#  Orchestrateur minimal : SSH → Terraform → Ansible
 # =============================================
 
 # Couleurs
@@ -28,27 +29,20 @@ echo -e "${BLUE}=================================================${NC}"
 echo ""
 
 # =============================================
-#  0. Vérification des pré-requis
+#  1. Vérification des pré-requis
 # =============================================
-log_info "[0/5] Vérification des pré-requis..."
+log_info "[1/3] Vérification des pré-requis..."
 MISSING=""
-for cmd in terraform ansible-playbook sshpass nc; do
+for cmd in terraform ansible-playbook; do
     if ! command -v "$cmd" &>/dev/null; then
         MISSING="$MISSING $cmd"
     fi
 done
-
 if [ -n "$MISSING" ]; then
     log_error "Outils manquants :$MISSING"
-    echo "  Installez-les avant de relancer le script."
     exit 1
 fi
-log_ok "Tous les pré-requis sont présents."
 
-# =============================================
-#  1. Génération de la clé SSH de déploiement
-# =============================================
-log_info "[1/5] Préparation de la clé SSH..."
 SSH_KEY="$HOME/.ssh/glpi_swarm_key"
 mkdir -p "$HOME/.ssh"
 if [ ! -f "$SSH_KEY" ]; then
@@ -57,16 +51,12 @@ if [ ! -f "$SSH_KEY" ]; then
 else
     log_ok "Clé SSH existante : $SSH_KEY"
 fi
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i $SSH_KEY"
 
 # =============================================
 #  2. Provisionnement Terraform (VMs KVM/libvirt)
 # =============================================
-log_info "[2/5] Provisionnement de l'infrastructure (Terraform)..."
-
+log_info "[2/3] Provisionnement de l'infrastructure (Terraform)..."
 cd infra
-
-# Nettoyage propre si re-déploiement
 terraform init -input=false
 
 if [ -f "terraform.tfstate" ]; then
@@ -75,108 +65,33 @@ if [ -f "terraform.tfstate" ]; then
     rm -f terraform.tfstate terraform.tfstate.backup
 fi
 
-terraform apply -auto-approve
+terraform apply -auto-approve \
+    -var "ssh_public_key=$(cat "$SSH_KEY.pub")" \
+    -var "ssh_private_key_path=$SSH_KEY"
 cd ..
-
 log_ok "3 VMs provisionnées avec succès."
 
 # =============================================
-#  3. Attente SSH + Déploiement des clés
+#  3. Configuration et déploiement (Ansible)
 # =============================================
-log_info "[3/5] Attente de la connectivité SSH et déploiement des clés..."
-
-IPS=$(grep "ansible_host" config/inventory.ini | awk -F'ansible_host=' '{print $2}' | awk '{print $1}')
-if [ -z "$IPS" ]; then
-    log_error "Aucune IP trouvée dans l'inventaire généré."
-    exit 1
-fi
-
-for IP in $IPS; do
-    log_info "  Attente SSH $IP..."
-    count=0
-    while ! nc -z -w 3 "$IP" 22 2>/dev/null; do
-        sleep 3
-        count=$((count + 3))
-        if [ $count -ge 120 ]; then
-            log_error "Timeout : $IP injoignable après ${count}s."
-            exit 1
-        fi
-    done
-    log_ok "  $IP accessible."
-done
-
-# Pause de stabilisation du service SSH
-sleep 5
-
-# Déploiement des clés SSH sur chaque VM
-log_info "Déploiement des clés SSH..."
-for IP in $IPS; do
-    sshpass -p 'vagrant' ssh-copy-id -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$SSH_KEY" vagrant@"$IP" 2>/dev/null || true
-    log_ok "  Clé déployée sur $IP"
-done
-
-# Mise à jour de l'inventaire pour utiliser l'authentification par clé
-log_info "Mise à jour de l'inventaire (auth par clé SSH)..."
-sed -i "s|ansible_ssh_pass=vagrant ansible_become_pass=vagrant|ansible_ssh_private_key_file=$SSH_KEY ansible_become_pass=vagrant|g" config/inventory.ini
-log_ok "Inventaire mis à jour."
-
-# =============================================
-#  4. Configuration avec Ansible
-# =============================================
-log_info "[4/5] Configuration système & cluster (Ansible)..."
+log_info "[3/3] Configuration système, cluster et application (Ansible)..."
 cd config
 export ANSIBLE_HOST_KEY_CHECKING=False
 ansible-playbook -i inventory.ini playbook.yml
 cd ..
-log_ok "Configuration Ansible terminée."
-
-# =============================================
-#  5. Déploiement de l'application
-# =============================================
-log_info "[5/5] Déploiement de la stack GLPI..."
-
-MANAGER_IP=$(grep "^manager " config/inventory.ini | awk -F'ansible_host=' '{print $2}' | awk '{print $1}')
-if [ -z "$MANAGER_IP" ]; then
-    log_error "Impossible de récupérer l'IP du manager."
-    exit 1
-fi
-
-log_info "Transfert des fichiers vers le Manager ($MANAGER_IP)..."
-scp $SSH_OPTS -r app/* vagrant@"$MANAGER_IP":/home/vagrant/
-
-log_info "Initialisation de la stack sur le Manager..."
-ssh $SSH_OPTS vagrant@"$MANAGER_IP" "chmod +x /home/vagrant/scripts/*.sh && /home/vagrant/scripts/init-stack.sh"
-
-log_info "Attente de la stabilisation des services..."
-WAIT_COUNT=0
-WAIT_MAX=180
-while [ $WAIT_COUNT -lt $WAIT_MAX ]; do
-    HTTP_CODE=$(ssh $SSH_OPTS vagrant@"$MANAGER_IP" "curl -s -o /dev/null -w '%{http_code}' http://localhost/" 2>/dev/null || echo "000")
-    if [ "$HTTP_CODE" = "200" ]; then
-        log_ok "GLPI accessible (HTTP 200) après ${WAIT_COUNT}s"
-        break
-    fi
-    sleep 10
-    WAIT_COUNT=$((WAIT_COUNT + 10))
-    echo -ne "\r  Attente... ${WAIT_COUNT}s / ${WAIT_MAX}s (HTTP: $HTTP_CODE)"
-done
-echo ""
-if [ $WAIT_COUNT -ge $WAIT_MAX ]; then
-    log_warn "GLPI n'a pas répondu HTTP 200 dans les ${WAIT_MAX}s — continuons."
-fi
-
-log_info "Configuration SSL automatique..."
-ssh $SSH_OPTS vagrant@"$MANAGER_IP" "/home/vagrant/scripts/init-letsencrypt.sh" || log_warn "SSL non configuré (normal en local, GLPI accessible en HTTP)."
-
-# Récupération des credentials
-log_info "Récupération des credentials MariaDB..."
-DB_CREDS=$(ssh $SSH_OPTS vagrant@"$MANAGER_IP" "cat /home/vagrant/.glpi_credentials 2>/dev/null" || true)
-DB_PASSWORD=$(echo "$DB_CREDS" | grep "Password" | head -1 | awk '{print $NF}')
-DB_ROOT_PASSWORD=$(echo "$DB_CREDS" | grep "Root Password" | awk '{print $NF}')
+log_ok "Déploiement Ansible terminé."
 
 # =============================================
 #  Résumé final
 # =============================================
+MANAGER_IP=$(grep "ansible_host" config/inventory.ini | head -1 | awk -F'ansible_host=' '{print $2}' | awk '{print $1}')
+DB_PASSWORD=""
+DB_ROOT_PASSWORD=""
+if [ -f ".glpi_credentials" ]; then
+    DB_PASSWORD=$(grep "Password" .glpi_credentials | head -1 | awk '{print $NF}')
+    DB_ROOT_PASSWORD=$(grep "Root Password" .glpi_credentials | awk '{print $NF}')
+fi
+
 echo ""
 echo -e "${GREEN}=================================================${NC}"
 echo -e "${GREEN}   DEPLOIEMENT TERMINE AVEC SUCCES !             ${NC}"
@@ -186,17 +101,14 @@ echo -e "  ${BLUE}Accès GLPI :${NC}"
 echo -e "    HTTP  : http://$MANAGER_IP"
 echo -e "    HTTPS : https://$MANAGER_IP"
 echo ""
+echo -e "  ${BLUE}Identifiants GLPI par défaut :${NC}"
+echo -e "    glpi / glpi  (Super-Admin)"
+echo ""
 echo -e "  ${BLUE}Base de données MariaDB :${NC}"
-echo -e "    Host          : mariadb"
-echo -e "    Port          : 3306"
-echo -e "    Database      : glpi"
 echo -e "    Utilisateur   : glpi"
 echo -e "    Mot de passe  : $DB_PASSWORD"
 echo -e "    Root password : $DB_ROOT_PASSWORD"
 echo ""
 echo -e "  ${BLUE}Accès SSH Manager :${NC}"
 echo -e "    ssh -i $SSH_KEY vagrant@$MANAGER_IP"
-echo ""
-echo -e "  ${BLUE}Vérifier les services :${NC}"
-echo -e "    ssh -i $SSH_KEY vagrant@$MANAGER_IP docker stack services glpi_stack"
 echo ""

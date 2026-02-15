@@ -5,6 +5,15 @@
 - name: Configuration de base - Tous les noeuds
   hosts: all
   become: yes
+  gather_facts: false
+  pre_tasks:
+    - name: Attente de la connectivité SSH
+      wait_for_connection:
+        delay: 10
+        timeout: 180
+
+    - name: Collecte des facts
+      setup:
   tasks:
     - name: Mise à jour du cache APT
       apt:
@@ -59,6 +68,9 @@
         name: vagrant
         groups: docker
         append: yes
+
+    - name: Recharger la connexion SSH (pour prise en compte du groupe docker)
+      meta: reset_connection
 
     - name: Création du répertoire partagé
       file:
@@ -247,3 +259,110 @@
         --token {{ hostvars[groups['managers'][0]]['worker_token']['stdout'] }}
         {{ hostvars[groups['managers'][0]]['ansible_host'] }}:2377
       when: swarm_status.stdout != 'active'
+
+# =============================================================
+#  Play 6 : Déploiement des fichiers applicatifs + Stack
+# =============================================================
+- name: Déploiement applicatif sur le Manager
+  hosts: managers
+  become: no
+  tasks:
+    - name: Copie des fichiers applicatifs
+      copy:
+        src: "{{ playbook_dir }}/../app/"
+        dest: /home/vagrant/
+        owner: vagrant
+        group: vagrant
+
+    - name: Rendre les scripts exécutables
+      file:
+        path: "/home/vagrant/scripts/{{ item }}"
+        mode: '0755'
+      loop:
+        - init-stack.sh
+        - init-letsencrypt.sh
+
+    - name: Vérifier si la stack est déjà déployée
+      shell: docker stack ls --format {% raw %}'{{.Name}}'{% endraw %} | grep -q glpi_stack
+      register: stack_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Initialiser la stack Docker Swarm
+      shell: /home/vagrant/scripts/init-stack.sh
+      args:
+        chdir: /home/vagrant
+      when: stack_exists.rc != 0
+
+# =============================================================
+#  Play 7 : Attente de GLPI et lecture des credentials
+# =============================================================
+- name: Attente de la disponibilité de GLPI
+  hosts: managers
+  become: no
+  tasks:
+    - name: Attente de GLPI (HTTP 200)
+      shell: curl -s -o /dev/null -w '%{http_code}' http://localhost/
+      register: http_check
+      until: http_check.stdout == "200"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Lire le mot de passe de la BDD
+      shell: grep "Password" /home/vagrant/.glpi_credentials | head -1 | awk '{print $NF}'
+      register: db_password_result
+      changed_when: false
+
+    - name: Stocker le mot de passe comme fait partagé
+      set_fact:
+        glpi_db_password: "{{ db_password_result.stdout }}"
+
+# =============================================================
+#  Play 8 : Installation automatique de la BDD GLPI
+# =============================================================
+- name: Installation de la base de données GLPI
+  hosts: swarm
+  become: no
+  tasks:
+    - name: Chercher le conteneur GLPI sur ce noeud
+      shell: docker ps -q -f name=glpi_stack_glpi
+      register: glpi_container
+      changed_when: false
+      failed_when: false
+
+    - name: Installer la base de données GLPI
+      shell: |
+        docker exec {{ glpi_container.stdout }} php /var/www/html/glpi/bin/console database:install \
+          --db-host=mariadb --db-port=3306 --db-name=glpi --db-user=glpi \
+          --db-password={{ hostvars[groups['managers'][0]]['glpi_db_password'] }} \
+          --default-language=fr_FR --no-interaction --force --allow-superuser
+      when: glpi_container.stdout != ""
+      register: glpi_install_result
+      failed_when: false
+
+# =============================================================
+#  Play 9 : Configuration SSL et finalisation
+# =============================================================
+- name: Configuration SSL et finalisation
+  hosts: managers
+  become: no
+  tasks:
+    - name: Exécuter le script de configuration SSL
+      shell: /home/vagrant/scripts/init-letsencrypt.sh
+      args:
+        chdir: /home/vagrant
+      register: ssl_result
+      failed_when: false
+
+    - name: Lire le fichier de credentials
+      slurp:
+        src: /home/vagrant/.glpi_credentials
+      register: credentials_file
+
+    - name: Sauvegarder les credentials localement
+      local_action:
+        module: copy
+        content: "{{ credentials_file.content | b64decode }}"
+        dest: "{{ playbook_dir }}/../.glpi_credentials"
+        mode: '0600'

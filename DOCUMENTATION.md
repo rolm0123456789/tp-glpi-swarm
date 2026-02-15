@@ -204,5 +204,3 @@ tp-glpi-swarm/
 ```
 
 ---
-
-*Projet réalisé dans le cadre du cours d'Architecture Logicielle - ESGI.*

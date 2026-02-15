@@ -10,6 +10,8 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
     lock_passwd: false
     groups: [sudo, adm]
+    ssh_authorized_keys:
+      - ${ssh_public_key}
 
 ssh_pwauth: true
 

@@ -27,6 +27,18 @@ variable "disk_size" {
   default     = 21474836480
 }
 
+variable "ssh_public_key" {
+  description = "Contenu de la clé publique SSH pour l'accès aux VMs"
+  type        = string
+  default     = ""
+}
+
+variable "ssh_private_key_path" {
+  description = "Chemin vers la clé privée SSH"
+  type        = string
+  default     = "~/.ssh/glpi_swarm_key"
+}
+
 variable "base_image_url" {
   description = "URL ou chemin local de l'image cloud Ubuntu 22.04 (qcow2)"
   type        = string
